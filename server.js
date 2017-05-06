@@ -1,28 +1,21 @@
 'use strict';
 
 const pg = require('pg');
+const fs = require('fs');
 const express = require('express');
 const bodyParser = require('body-parser');
 const requestProxy = require('express-request-proxy'); // REVIEW: We've added a new package here to our requirements, as well as in the package.json
-const app = express();
 const PORT = process.env.PORT || 3000;
-const conString = process.env.DATABASE_URL || ''; // TODO: Don't forget to set your own conString
+const app = express();
+// const conString = 'postgres://USERNAME:PASSWORD@HOST:PORT';
+const conString = postgres.env.DATABASE_URL || 'postgres://namgungssi@localhost:PORT'; // TODO: Don't forget to set your own conString
 const client = new pg.Client(conString);
-client.connect(console.error);
+client.connect();
+client.on('error', err => console.error(err));
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({extended: true}));
 app.use(express.static('./public'));
-
-
-// NOTE: Routes for requesting HTML resources
-app.get('/', (request, response) => response.sendFile('index.html', {root: './public'}));
-app.get('/new', (request, response) => response.sendFile('new.html', {root: './public'}));
-app.get('/about', (request, response) => response.sendFile('index.html', {root: './public'}));
-
-
-// REVIEW: This is a new route that will utilize our middle man proxy.
-app.get('/github/*', proxyGitHub);
 
 // REVIEW: This is a new proxy method which acts as a 'middle man' (middleware) for our request.
 function proxyGitHub(request, response) {
@@ -33,9 +26,132 @@ function proxyGitHub(request, response) {
   }))(request, response);
 }
 
+// REVIEW: This is a new route that will utilize our middle man proxy.
+app.get('/github/https://stark-escarpment-19180.herokuapp.com/', proxyGitHub);
 
-// NOTE: Routes for making API calls to enact CRUD Operations on our database
+app.get('/new', (request, response) => response.sendFile('new.html', {root: './public'}));
+app.get('/admin', (request, response) => response.sendFile('admin.html', {root: './public'}));
 app.get('/articles', (request, response) => {
+  client.query(`
+    SELECT * FROM articles
+    INNER JOIN authors
+      ON articles.author_id=authors.author_id;`
+  )
+  .then(result => response.send(result.rows))
+  .catch(console.error);
+});
+
+app.post('/articles', (request, response) => {
+  client.query(
+    'INSERT INTO authors(author, "authorUrl") VALUES($1, $2) ON CONFLICT DO NOTHING',
+    [request.body.author, request.body.authorUrl]
+  )
+  .then(() => {
+    client.query(`
+      INSERT INTO
+      articles(author_id, title, category, "publishedOn", body)
+      SELECT author_id, $1, $2, $3, $4
+      FROM authors
+      WHERE author=$5;
+      `,
+      [
+        request.body.title,
+        request.body.category,
+        request.body.publishedOn,
+        request.body.body,
+        request.body.author
+      ]
+    )
+  })
+  .then(() => response.send('Insert complete'))
+  .catch(console.error);
+});
+
+app.put('/articles/:id', (request, response) => {
+  client.query(`
+    UPDATE authors
+    SET author=$1, "authorUrl"=$2
+    WHERE author_id=$3
+    `,
+    [request.body.author, request.body.authorUrl, request.body.author_id]
+  )
+  .then(() => {
+    client.query(`
+      UPDATE articles
+      SET author_id=$1, title=$2, category=$3, "publishedOn"=$4, body=$5
+      WHERE article_id=$6
+      `,
+      [
+        request.body.author_id,
+        request.body.title,
+        request.body.category,
+        request.body.publishedOn,
+        request.body.body,
+        request.params.id
+      ]
+    )
+  })
+  .then(() => response.send('Update complete'))
+  .catch(console.error);
+});
+
+app.delete('/articles/:id', (request, response) => {
+  client.query(
+    `DELETE FROM articles WHERE article_id=$1;`,
+    [request.params.id]
+  )
+  .then(() => response.send('Delete complete'))
+  .catch(console.error);
+});
+
+app.delete('/articles', (request, response) => {
+  client.query('DELETE FROM articles')
+  .then(() => response.send('Delete complete'))
+  .catch(console.error);
+});
+
+loadDB();
+
+app.listen(PORT, () => console.log(`Server started on port ${PORT}!`));
+
+
+//////// ** DATABASE LOADERS ** ////////
+////////////////////////////////////////
+function loadAuthors() {
+  fs.readFile('./public/data/hackerIpsum.json', (err, fd) => {
+    JSON.parse(fd.toString()).forEach(ele => {
+      client.query(
+        'INSERT INTO authors(author, "authorUrl") VALUES($1, $2) ON CONFLICT DO NOTHING',
+        [ele.author, ele.authorUrl]
+      )
+      .catch(console.error);
+    })
+  })
+}
+
+function loadArticles() {
+  client.query('SELECT COUNT(*) FROM articles')
+  .then(result => {
+    if(!parseInt(result.rows[0].count)) {
+      fs.readFile('./public/data/hackerIpsum.json', (err, fd) => {
+        JSON.parse(fd.toString()).forEach(ele => {
+          client.query(`
+            INSERT INTO
+            articles(author_id, title, category, "publishedOn", body)
+            SELECT author_id, $1, $2, $3, $4
+            FROM authors
+            WHERE author=$5;
+          `,
+            [ele.title, ele.category, ele.publishedOn, ele.body, ele.author]
+          )
+          .catch(console.error);
+        })
+      })
+    }
+  })
+}
+
+function loadDB() {
   client.query(`
     CREATE TABLE IF NOT EXISTS
     authors (
@@ -44,6 +160,9 @@ app.get('/articles', (request, response) => {
       "authorUrl" VARCHAR (255)
     );`
   )
+  .then(loadAuthors)
+  .catch(console.error);
+
   client.query(`
     CREATE TABLE IF NOT EXISTS
     articles (
@@ -55,112 +174,6 @@ app.get('/articles', (request, response) => {
       body TEXT NOT NULL
     );`
   )
-  client.query(`
-    SELECT * FROM articles
-    INNER JOIN authors
-      ON articles.author_id=authors.author_id;`,
-    (err, result) => {
-      if (err) console.error(err);
-      response.send(result.rows);
-    }
-  );
-});
-
-app.post('/articles', (request, response) => {
-  client.query(
-    'INSERT INTO authors(author, "authorUrl") VALUES($1, $2) ON CONFLICT DO NOTHING',
-    [request.body.author, request.body.authorUrl],
-    err => {
-      if (err) console.error(err)
-      queryTwo()
-    }
-  )
-
-  function queryTwo() {
-    client.query(
-      `SELECT author_id FROM authors WHERE author=$1`,
-      [request.body.author],
-      (err, result) => {
-        if (err) console.error(err)
-        queryThree(result.rows[0].author_id)
-      }
-    )
-  }
-
-  function queryThree(author_id) {
-    client.query(
-      `INSERT INTO
-      articles(author_id, title, category, "publishedOn", body)
-      VALUES ($1, $2, $3, $4, $5);`,
-      [
-        author_id,
-        request.body.title,
-        request.body.category,
-        request.body.publishedOn,
-        request.body.body
-      ],
-      err => {
-        if (err) console.error(err);
-        response.send('insert complete');
-      }
-    );
-  }
-});
-
-app.put('/articles/:id', (request, response) => {
-  client.query(
-    `SELECT author_id FROM authors WHERE author=$1`,
-    [request.body.author],
-    (err, result) => {
-      if (err) console.error(err)
-      queryTwo(result.rows[0].author_id)
-      queryThree(result.rows[0].author_id)
-    }
-  )
-
-  function queryTwo(author_id) {
-    client.query(
-      `UPDATE authors
-      SET author=$1, "authorUrl"=$2
-      WHERE author_id=$3;`,
-      [request.body.author, request.body.authorUrl, author_id]
-    )
-  }
-
-  function queryThree(author_id) {
-    client.query(
-      `UPDATE articles
-      SET author_id=$1, title=$2, category=$3, "publishedOn"=$4, body=$5
-      WHERE article_id=$6;`,
-      [
-        author_id,
-        request.body.title,
-        request.body.category,
-        request.body.publishedOn,
-        request.body.body,
-        request.params.id
-      ],
-      err => {
-        if (err) console.error(err);
-        response.send('insert complete');
-      }
-    );
-  }
-});
-
-app.delete('/articles/:id', (request, response) => {
-  client.query(
-    `DELETE FROM articles WHERE article_id=$1;`,
-    [request.params.id]
-  );
-  response.send('Delete complete');
-});
-
-app.delete('/articles', (request, response) => {
-  client.query(
-    'DELETE FROM articles;'
-  );
-  response.send('Delete complete');
-});
-
-app.listen(PORT, () => console.log(`Server started on port ${PORT}!`));
+  .then(loadArticles)
+  .catch(console.error);
+}
